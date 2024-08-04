@@ -11,20 +11,30 @@ logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S',
                     handlers=[
-                        logging.FileHandler("{}-{}.log".format(server_prog, client_prog)),  # Log file name
-                        logging.StreamHandler()  # Log to stdout
+                        logging.FileHandler("{}-{}.log".format(server_prog, client_prog)),
+                        logging.StreamHandler()
                     ])
 
 # Global lock for thread safety
 lock = threading.Lock()
 
-# Initialize ticket database
+# Global ticket database
 tickets = {f"{10000 + i}": {"price": random.randint(200, 400), "sold": False} for i in range(25)}
+
+# Connection barrier to wait for both clients
+connection_barrier = threading.Barrier(2)  # Set to 2, for two clients
 
 
 def handle_client(client_socket, address):
     global tickets
     transaction_log = []
+
+    # Wait for all clients to connect
+    try:
+        connection_barrier.wait()
+    except threading.BrokenBarrierError:
+        logging.error("Barrier is broken due to some client disconnection!")
+        return
 
     while True:
         try:
@@ -32,7 +42,7 @@ def handle_client(client_socket, address):
             if not data:
                 break
 
-            logging.info(f"Received from {address}: {data}")  # Log received data
+            logging.info(f"Received from {address}: {data}")
             cmd, *args = data.split()
 
             # Process BUY request
@@ -42,15 +52,16 @@ def handle_client(client_socket, address):
                 with lock:
                     for ticket, details in tickets.items():
                         if not details['sold'] and user_balance >= details['price']:
-                            details['sold'] = True
-                            response = f"{ticket} {details['price']}"
-                            transaction_log.append((ticket, 'BUY'))
-                            break
-                        elif not details['sold']:
-                            response = "NOFUNDS"
-                            break
+                            if user_balance >= details['price']:
+                                details['sold'] = True
+                                response = f"{ticket} {details['price']}"
+                                transaction_log.append((ticket, 'BUY'))
+                                break
+                            else:
+                                response = "NOFUNDS"
+                                break
                 client_socket.sendall(response.encode())
-                logging.info(f"Sent to {address}: {response}")  # Log sent data
+                logging.info(f"Sent to {address}: {response}")
 
             # Process SELL request
             elif cmd == "SELL":
@@ -61,11 +72,10 @@ def handle_client(client_socket, address):
                         response = f"{ticket_number} {tickets[ticket_number]['price']}"
                         transaction_log.append((ticket_number, 'SELL'))
                         client_socket.sendall(response.encode())
-                        logging.info(f"Sent to {address}: {response}")  # Log sent data
+                        logging.info(f"Sent to {address}: {response}")
                     else:
-                        error_msg = "ERROR"
-                        client_socket.sendall(error_msg.encode())
-                        logging.info(f"Sent to {address}: {error_msg}")  # Log error sent
+                        client_socket.sendall("ERROR".encode())
+                        logging.error(f"Sent to {address}: ERROR: Invalid ticket!")
 
         except Exception as e:
             logging.error(f"Error with client {address}: {e}")
@@ -78,9 +88,8 @@ def handle_client(client_socket, address):
 def start_server(port):
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.bind(('localhost', port))
-    server_socket.listen(2)
+    server_socket.listen(2)  # Expecting exactly 2 clients
 
-    logging.info("Server started, waiting for clients.")
     logging.info("Initial Tickets:")
     for ticket, details in tickets.items():
         logging.info(f"Ticket #{ticket}, Price: ${details['price']}, Sold: {details['sold']}")
@@ -94,8 +103,9 @@ def start_server(port):
             client_thread.start()
             clients.append(client_thread)
     except KeyboardInterrupt:
-        logging.info("Server shutdown initiated by KeyboardInterrupt.")
+        logging.info("Server is shutting down...")
 
+    # Wait for all threads to complete
     for thread in clients:
         thread.join()
 
@@ -104,7 +114,6 @@ def start_server(port):
         logging.info(f"Ticket #{ticket}, Price: ${details['price']}, Sold: {details['sold']}")
 
     server_socket.close()
-    logging.info("Server has been shutdown.")
 
 
 if __name__ == "__main__":
